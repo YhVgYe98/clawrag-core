@@ -1,211 +1,46 @@
-#!/home/claw/.openclaw/workspace/.venv/bin/python3
-import argparse
-import csv
-import hashlib
-import json
-import os
-import sys
-from pathlib import Path
+# rag-core
 
-import lancedb
-import pandas as pd
-import requests
+基于 Python + LanceDB 的本地向量数据库管理工具。
 
-def log_error(msg):
-    print(f"[ERROR] {msg}", file=sys.stderr)
+> **免责声明**：本工具的代码由 AI Agent (小小苏) 自动生成并维护，旨在提供高效的本地知识库管理方案。用户在使用过程中应自行评估数据安全风险。
 
-def log_info(msg):
-    print(f"[INFO] {msg}", file=sys.stderr)
+## 🚀 CLI 设计规范
 
-def get_embedding(text, url, key, model):
-    headers = {"Content-Type": "application/json"}
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    
-    payload = {
-        "model": model,
-        "input": text
-    }
-    
-    try:
-        resp = requests.post(url, json=payload, headers=headers, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
-        return data["data"][0]["embedding"]
-    except Exception as e:
-        log_error(f"Embedding API request failed: {e}")
-        sys.exit(1)
+全局参数：
+- `-d, --db <PATH>` : 数据库根路径 (默认: `./rag_data`)
+- `--api-url <URL>` : Embedding API 的完整地址 (如 `http://.../v1/embeddings`)。**必填，无默认值。**
+- `--api-key <KEY>` : Embedding API Key (Auth Token)。**可选，无默认值。** 若 API 无需验证可不传。
 
-def main():
-    parser = argparse.ArgumentParser(description="rag-core: 通用向量数据库管理工具 (Python 版)")
-    parser.add_argument("-d", "--db", default="./rag_data", help="数据库根路径")
-    parser.add_argument("--api-url", help="Embedding API URL")
-    parser.add_argument("--api-key", help="Embedding API Key")
-    
-    subparsers = parser.add_subparsers(dest="command")
-    
-    # Init
-    subparsers.add_parser("init", help="初始化数据库环境")
-    
-    # Table
-    table_parser = subparsers.add_parser("table", help="表管理操作")
-    table_sub = table_parser.add_subparsers(dest="action")
-    
-    table_sub.add_parser("list", help="列出所有表")
-    
-    new_parser = table_sub.add_parser("new", help="创建新表")
-    new_parser.add_argument("name", help="表名")
-    new_parser.add_argument("--dim", type=int, default=1024, help="向量维度")
-    new_parser.add_argument("--model", required=True, help="关联模型名")
-    
-    del_parser = table_sub.add_parser("delete", help="删除表")
-    del_parser.add_argument("name", help="表名")
-    
-    info_parser = table_sub.add_parser("info", help="获取表信息")
-    info_parser.add_argument("name", help="表名")
-    
-    # Data operations
-    ingest_parser = subparsers.add_parser("ingest", help="入库数据")
-    ingest_parser.add_argument("-t", "--table", required=True, help="目标表名")
-    ingest_parser.add_argument("file", help="数据文本文件路径")
-    ingest_parser.add_argument("--name", required=True, help="来源标识")
-    
-    query_parser = subparsers.add_parser("query", help="语义查询")
-    query_parser.add_argument("-t", "--table", required=True, help="目标表名")
-    query_parser.add_argument("text", help="查询文本")
-    query_parser.add_argument("-l", "--limit", type=int, default=5, help="返回数量")
-    
-    search_parser = subparsers.add_parser("search", help="按 name 精确查找匹配 ID")
-    search_parser.add_argument("-t", "--table", required=True, help="目标表名")
-    search_parser.add_argument("--name", required=True, help="来源标识")
-    
-    delete_data_parser = subparsers.add_parser("delete", help="按 ID 删除记录")
-    delete_data_parser.add_argument("-t", "--table", required=True, help="目标表名")
-    delete_data_parser.add_argument("id", help="记录 ID")
-    
-    clear_parser = subparsers.add_parser("clear", help="清空表")
-    clear_parser.add_argument("-t", "--table", required=True, help="目标表名")
-    
-    args = parser.parse_args()
-    
-    if not args.command:
-        parser.print_help()
-        return
+### 1. 基础环境
+| 命令 | 说明 |
+| :--- | :--- |
+| `init` | 初始化数据库根目录结构。 |
 
-    db = lancedb.connect(args.db)
-    csv_writer = csv.writer(sys.stdout)
+### 2. 表管理 (Table Management)
+| 命令 | 说明 | 示例 |
+| :--- | :--- | :--- |
+| `table list` | [CSV] 列出所有表及其条目数。 | `rag-core table list` |
+| `table new <NAME>` | 创建一个新表。参数：`--dim <INT>` (维度), `--model <STR>` (关联嵌入模型名)。 | `rag-core table new papers --model qwen3-embedding-0.6b` |
+| `table delete <NAME>` | 删除指定的表及关联元数据。 | `rag-core table delete old_cache` |
+| `table info <NAME>` | [CSV] 输出指定表的详细信息：维度、关联模型、条目数。 | `rag-core table info main_lib` |
 
-    if args.command == "init":
-        os.makedirs(args.db, exist_ok=True)
-        log_info(f"数据库目录已初始化: {args.db}")
-        
-    elif args.command == "table":
-        if args.action == "list":
-            tables = db.list_tables()
-            csv_writer.writerow(["table", "count"])
-            for tname in tables:
-                tbl = db.open_table(tname)
-                # 使用 len(tbl) 或 count_rows() 获取更高效的统计
-                csv_writer.writerow([tname, tbl.count_rows()])
-                
-        elif args.action == "new":
-            # 存一份元数据到对应的隐藏文件
-            meta = {"dim": args.dim, "model": args.model}
-            Path(args.db).mkdir(parents=True, exist_ok=True)
-            with open(Path(args.db) / f"{args.name}.meta.json", "w") as f:
-                json.dump(meta, f)
-            log_info(f"表元数据已保存: {args.name} (将在首次 Ingest 时正式创建)")
-            
-        elif args.action == "delete":
-            db.drop_table(args.name)
-            meta_file = Path(args.db) / f"{args.name}.meta.json"
-            if meta_file.exists(): meta_file.unlink()
-            log_info(f"表已删除: {args.name}")
-            
-        elif args.action == "info":
-            meta_file = Path(args.db) / f"{args.name}.meta.json"
-            model, dim = "unknown", "unknown"
-            if meta_file.exists():
-                with open(meta_file, "r") as f:
-                    m = json.load(f)
-                    model, dim = m.get("model"), m.get("dim")
-            tbl = db.open_table(args.name)
-            count = tbl.count_rows()
-            csv_writer.writerow(["table", "dimensions", "embedding_model", "item_count"])
-            csv_writer.writerow([args.name, dim, model, count])
+### 3. 数据操作 (必须指定 `-t`)
+| 命令 | 说明 | 示例 |
+| :--- | :--- | :--- |
+| `ingest -t <TAB>` | 入库分块。 | `rag-core ingest -t papers chunk.txt --name "p1"` |
+| `query -t <TAB>` | [CSV] 语义查询。 | `rag-core query -t papers "偏振" -l 5` |
+| `search -t <TAB>` | [CSV] 按 name 精确查找匹配的 ID 列表。 | `rag-core search -t papers --name "p1"` |
+| `delete -t <TAB>` | 按 ID 删除特定记录。 | `rag-core delete -t papers <id>` |
+| `clear -t <TAB>` | 清空表中所有数据。 | `rag-core clear -t papers` |
 
-    elif args.command == "ingest":
-        if not args.api_url:
-            log_error("--api-url is required for ingest")
-            sys.exit(1)
-        
-        meta_file = Path(args.db) / f"{args.table}.meta.json"
-        if not meta_file.exists():
-            log_error(f"表 {args.table} 的元数据不存在，请先执行 table new")
-            sys.exit(1)
-            
-        with open(meta_file, "r") as f:
-            meta = json.load(f)
-        
-        with open(args.file, "r", encoding="utf-8") as f:
-            text = f.read()
-            
-        vec = get_embedding(text, args.api_url, args.api_key, meta["model"])
-        doc_id = hashlib.sha256((text + args.name).encode()).hexdigest()
-        
-        data = [{"id": doc_id, "name": args.name, "text": text, "vector": vec}]
-        
-        if args.table in db.table_names():
-            tbl = db.open_table(args.table)
-            tbl.add(data)
-        else:
-            db.create_table(args.table, data)
-            
-        csv_writer.writerow(["status", "id", "name"])
-        csv_writer.writerow(["success", doc_id, args.name])
+---
 
-    elif args.command == "query":
-        if not args.api_url:
-            log_error("--api-url is required for query")
-            sys.exit(1)
-            
-        meta_file = Path(args.db) / f"{args.table}.meta.json"
-        if not meta_file.exists():
-            log_error(f"无法获取模型信息，请确保 {args.table}.meta.json 存在")
-            sys.exit(1)
-            
-        with open(meta_file, "r") as f:
-            meta = json.load(f)
-            
-        vec = get_embedding(args.text, args.api_url, args.api_key, meta["model"])
-        tbl = db.open_table(args.table)
-        
-        results = tbl.search(vec).limit(args.limit).to_pandas()
-        
-        csv_writer.writerow(["score", "id", "name", "text"])
-        for _, row in results.iterrows():
-            score = 1 - row.get("_distance", 1.0)
-            clean_text = str(row["text"]).replace("\n", " ")
-            csv_writer.writerow([f"{score:.4f}", row["id"], row["name"], clean_text])
+## 📊 CSV 输出格式定义
 
-    elif args.command == "search":
-        tbl = db.open_table(args.table)
-        # 简单过滤搜索
-        res = tbl.to_pandas()
-        matches = res[res["name"] == args.name]
-        csv_writer.writerow(["id", "name"])
-        for _, row in matches.iterrows():
-            csv_writer.writerow([row["id"], row["name"]])
+所有输出到 `stdout` 的数据均包含 Header 表头。
 
-    elif args.command == "delete":
-        tbl = db.open_table(args.table)
-        tbl.delete(f'id = "{args.id}"')
-        log_info(f"记录已删除: {args.id}")
+---
 
-    elif args.command == "clear":
-        tbl = db.open_table(args.table)
-        tbl.delete("true")
-        log_info(f"表已清空: {args.table}")
-
-if __name__ == "__main__":
-    main()
+## ⚠️ 开发者规则
+1. **禁止硬编码**：API 相关配置禁止设置默认值，必须显式传参。
+2. **Stdout 纯净性**：stdout 仅输出 CSV 数据，日志与错误输出到 stderr。
